@@ -15,6 +15,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   :root {
     box-sizing: border-box;
@@ -613,10 +614,10 @@
         <div class="herramientas-acciones">
           <button class="btn-primario" id="btnExportar">⇩ Descargar respaldo</button>
           <button class="btn-secundario" id="btnImportar">⇧ Importar respaldo</button>
-          <button class="btn-secundario" id="btnImportarCsv">⇧ Importar CSV</button>
+          <button class="btn-secundario" id="btnImportarCsv">⇧ Importar Excel / CSV</button>
           <button class="btn-secundario" id="btnConfigurarPin">⌧ Configurar PIN</button>
           <input type="file" id="archivoImportar" accept="application/json" hidden>
-          <input type="file" id="archivoCsv" accept=".csv,text/csv" hidden>
+          <input type="file" id="archivoCsv" accept=".xlsx,.xls,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden>
         </div>
         <div class="respaldo-nota">El respaldo incluye cuentas, movimientos, gastos fijos y metas de ahorro.</div>
         <div class="respaldo-nota" id="estadoRespaldo"></div>
@@ -1836,22 +1837,31 @@
     if (!archivo) return;
     var lector = new FileReader();
     lector.onload = function () {
-      var lineas = lector.result.split(/\r?\n/).filter(function (linea) { return linea.trim(); });
-      if (lineas.length < 2) return;
-      var encabezados = lineas.shift().split(',').map(function (valor) { return valor.trim().toLowerCase(); });
-      var agregados = 0;
-      lineas.forEach(function (linea) {
-        var columnas = linea.split(',');
-        var fila = {}; encabezados.forEach(function (encabezado, i) { fila[encabezado] = (columnas[i] || '').trim(); });
-        var monto = parseFloat((fila.monto || fila.valor || '0').replace(/[^0-9.-]/g, ''));
-        var cuenta = datos.cuentas.find(function (item) { return item.nombre.toLowerCase() === (fila.cuenta || '').toLowerCase(); }) || datos.cuentas[0];
-        if (!cuenta || !fila.descripcion || !fila.fecha || !isFinite(monto) || monto <= 0) return;
-        datos.movimientos.push({ id: uid(), fecha: fila.fecha, monto: monto, descripcion: fila.descripcion, cuentaId: cuenta.id, categoria: fila.categoria || '', tipo: (fila.tipo || 'gasto').toLowerCase() === 'ingreso' ? 'ingreso' : 'gasto', creado: Date.now() });
-        agregados++;
-      });
-      guardarDatos(); render(); alert(agregados + ' movimientos importados.'); e.target.value = '';
+      try {
+        var libro = XLSX.read(lector.result, { type: 'array', cellDates: true });
+        var filas = XLSX.utils.sheet_to_json(libro.Sheets[libro.SheetNames[0]], { defval: '', raw: false });
+        var agregados = 0;
+        filas.forEach(function (fila) {
+          var normalizada = {};
+          Object.keys(fila).forEach(function (clave) { normalizada[clave.trim().toLowerCase()] = fila[clave]; });
+          var fecha = normalizada.fecha || normalizada.date;
+          if (fecha instanceof Date) fecha = fecha.toISOString().slice(0, 10);
+          fecha = String(fecha || '').trim();
+          var montoTexto = String(normalizada.monto || normalizada.valor || '0').replace(/\$/g, '').replace(/\./g, '').replace(',', '.').replace(/[^0-9.-]/g, '');
+          var monto = parseFloat(montoTexto);
+          var descripcion = String(normalizada.descripcion || normalizada.descripción || normalizada.detalle || '').trim();
+          var cuenta = datos.cuentas.find(function (item) { return item.nombre.toLowerCase() === String(normalizada.cuenta || '').trim().toLowerCase(); }) || datos.cuentas[0];
+          if (!cuenta || !descripcion || !fecha || !isFinite(monto) || monto <= 0) return;
+          datos.movimientos.push({ id: uid(), fecha: fecha, monto: monto, descripcion: descripcion, cuentaId: cuenta.id, categoria: String(normalizada.categoria || '').trim(), tipo: String(normalizada.tipo || 'gasto').toLowerCase() === 'ingreso' ? 'ingreso' : 'gasto', creado: Date.now() });
+          agregados++;
+        });
+        guardarDatos(); render(); alert(agregados + ' movimientos importados.');
+      } catch (error) {
+        alert('No se pudo leer el archivo. Usa un Excel con columnas fecha, monto, descripcion, cuenta, categoria y tipo.');
+      }
+      e.target.value = '';
     };
-    lector.readAsText(archivo);
+    lector.readAsArrayBuffer(archivo);
   });
 
   function actualizarEstadoRespaldo() {
