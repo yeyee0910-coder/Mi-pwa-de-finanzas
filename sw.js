@@ -1,4 +1,4 @@
-var CACHE_NAME = 'mis-finanzas-v1';
+var CACHE_NAME = 'mis-finanzas-v8';
 var APP_SHELL = [
   './index.html',
   './manifest.json'
