@@ -1839,25 +1839,64 @@
     lector.onload = function () {
       try {
         var libro = XLSX.read(lector.result, { type: 'array', cellDates: true });
-        var filas = XLSX.utils.sheet_to_json(libro.Sheets[libro.SheetNames[0]], { defval: '', raw: false });
+        var nombreHoja = libro.SheetNames.find(function (nombre) {
+          return XLSX.utils.sheet_to_json(libro.Sheets[nombre], { header: 1, defval: '' }).some(function (fila) {
+            return fila.some(function (celda) { return String(celda).trim(); });
+          });
+        });
+        if (!nombreHoja) throw new Error('El archivo no tiene datos');
+        var filas = XLSX.utils.sheet_to_json(libro.Sheets[nombreHoja], { defval: '', raw: false });
+        function claveNormalizada(clave) {
+          return String(clave).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+        }
+        function buscarCampo(fila, nombres) {
+          var claves = Object.keys(fila);
+          for (var i = 0; i < nombres.length; i++) {
+            var buscada = claveNormalizada(nombres[i]);
+            var encontrada = claves.find(function (clave) { return claveNormalizada(clave) === buscada; });
+            if (encontrada && fila[encontrada] !== '') return fila[encontrada];
+          }
+          return '';
+        }
+        function convertirFecha(valor) {
+          if (valor instanceof Date) return valor.toISOString().slice(0, 10);
+          var texto = String(valor || '').trim();
+          var partes = texto.split(/[\/-]/);
+          if (partes.length === 3 && partes[0].length <= 2) {
+            return partes[2].length === 4 ? partes[2] + '-' + partes[1].padStart(2, '0') + '-' + partes[0].padStart(2, '0') : texto;
+          }
+          var fecha = new Date(texto);
+          return isNaN(fecha.getTime()) ? texto : fecha.toISOString().slice(0, 10);
+        }
+        function convertirMonto(valor) {
+          var texto = String(valor == null ? '' : valor).replace(/\$/g, '').replace(/\s/g, '');
+          var tienePunto = texto.indexOf('.') >= 0;
+          var tieneComa = texto.indexOf(',') >= 0;
+          if (tienePunto && tieneComa) texto = texto.replace(/\./g, '').replace(',', '.');
+          else if (tienePunto && /\.\d{3}$/.test(texto)) texto = texto.replace(/\./g, '');
+          else if (tieneComa && /,\d{3}$/.test(texto)) texto = texto.replace(/,/g, '');
+          else texto = texto.replace(',', '.');
+          return parseFloat(texto.replace(/[^0-9.-]/g, ''));
+        }
         var agregados = 0;
         filas.forEach(function (fila) {
-          var normalizada = {};
-          Object.keys(fila).forEach(function (clave) { normalizada[clave.trim().toLowerCase()] = fila[clave]; });
-          var fecha = normalizada.fecha || normalizada.date;
-          if (fecha instanceof Date) fecha = fecha.toISOString().slice(0, 10);
-          fecha = String(fecha || '').trim();
-          var montoTexto = String(normalizada.monto || normalizada.valor || '0').replace(/\$/g, '').replace(/\./g, '').replace(',', '.').replace(/[^0-9.-]/g, '');
-          var monto = parseFloat(montoTexto);
-          var descripcion = String(normalizada.descripcion || normalizada.descripción || normalizada.detalle || '').trim();
-          var cuenta = datos.cuentas.find(function (item) { return item.nombre.toLowerCase() === String(normalizada.cuenta || '').trim().toLowerCase(); }) || datos.cuentas[0];
+          var fecha = convertirFecha(buscarCampo(fila, ['fecha', 'date', 'dia', 'día', 'fecha movimiento']));
+          var montoOriginal = buscarCampo(fila, ['monto', 'monto cop', 'valor', 'importe', 'amount', 'total', 'saldo']);
+          var monto = convertirMonto(montoOriginal || '0');
+          var descripcion = String(buscarCampo(fila, ['descripcion', 'descripción', 'detalle', 'concepto', 'nombre', 'movimiento', 'description']) || 'Movimiento importado').trim();
+          var nombreCuentaImportada = String(buscarCampo(fila, ['cuenta', 'cuenta bancaria', 'banco', 'account']) || '').trim().toLowerCase();
+          var cuenta = datos.cuentas.find(function (item) { return item.nombre.toLowerCase() === nombreCuentaImportada; }) || datos.cuentas[0];
+          var tipoImportado = claveNormalizada(buscarCampo(fila, ['tipo', 'type', 'naturaleza', 'clase']));
+          var tipo = tipoImportado.indexOf('ingreso') >= 0 || tipoImportado === 'entrada' ? 'ingreso' : 'gasto';
+          if (!tipoImportado && monto < 0) tipo = 'gasto';
+          monto = Math.abs(monto);
           if (!cuenta || !descripcion || !fecha || !isFinite(monto) || monto <= 0) return;
-          datos.movimientos.push({ id: uid(), fecha: fecha, monto: monto, descripcion: descripcion, cuentaId: cuenta.id, categoria: String(normalizada.categoria || '').trim(), tipo: String(normalizada.tipo || 'gasto').toLowerCase() === 'ingreso' ? 'ingreso' : 'gasto', creado: Date.now() });
+          datos.movimientos.push({ id: uid(), fecha: fecha, monto: monto, descripcion: descripcion, cuentaId: cuenta.id, categoria: String(buscarCampo(fila, ['categoria', 'categoría', 'category', 'rubro']) || '').trim(), tipo: tipo, creado: Date.now() });
           agregados++;
         });
-        guardarDatos(); render(); alert(agregados + ' movimientos importados.');
+        guardarDatos(); render(); alert(agregados + ' movimientos importados desde "' + nombreHoja + '".');
       } catch (error) {
-        alert('No se pudo leer el archivo. Usa un Excel con columnas fecha, monto, descripcion, cuenta, categoria y tipo.');
+        alert('No se pudo leer el archivo. Revisa que tenga una fila de encabezados y datos.');
       }
       e.target.value = '';
     };
