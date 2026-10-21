@@ -528,7 +528,7 @@
           <div class="stat-valor negativo" id="gastoMes">$0</div>
         </div>
         <div class="stat-card">
-          <div class="stat-label" id="labelDisponible">Disponible del mes</div>
+          <div class="stat-label" id="labelDisponible">Disponible acumulado</div>
           <div class="stat-valor" id="disponibleCifra">$0</div>
           <div class="disponible-barra"><div class="disponible-relleno" id="disponibleRelleno"></div></div>
         </div>
@@ -800,6 +800,7 @@
             if (!datos.gastosFijos) datos.gastosFijos = [];
             if (!Array.isArray(datos.deudas)) datos.deudas = [];
             if (!Array.isArray(datos.presupuestos)) datos.presupuestos = [];
+            quitarPagosAutomaticosFalsos();
             normalizarAhorros();
             try { localStorage.setItem(STORAGE_KEY, JSON.stringify(datos)); } catch (e) {}
             render();
@@ -823,6 +824,13 @@
   var datos = cargarDatos();
   if (!datos.gastosFijos) datos.gastosFijos = [];
   if (!Array.isArray(datos.deudas)) datos.deudas = [];
+  function quitarPagosAutomaticosFalsos() {
+    if (!Array.isArray(datos.movimientos)) datos.movimientos = [];
+    datos.movimientos = datos.movimientos.filter(function (movimiento) {
+      return !(movimiento.automatico && movimiento.gastoFijoId);
+    });
+  }
+  quitarPagosAutomaticosFalsos();
   var tipoSeleccionado = 'ingreso';
   var movimientoEditandoId = null;
   var deudaAbonoId = null;
@@ -864,16 +872,6 @@
       totales[categoria] = (totales[categoria] || 0) + movimiento.monto;
     });
     return totales;
-  }
-
-  function generarGastosFijosAutomaticos() {
-    var mes = mesActualStr();
-    datos.gastosFijos.forEach(function (fijo) {
-      if (!fijo.recurrente || !fijo.cuentaId || pagadoEsteMes(fijo.id)) return;
-      var dia = Math.min(fijo.diaPago || 1, diasEnMes(new Date().getFullYear(), new Date().getMonth()));
-      var fecha = new Date().getFullYear() + '-' + String(new Date().getMonth() + 1).padStart(2, '0') + '-' + String(dia).padStart(2, '0');
-      datos.movimientos.push({ id: uid(), fecha: fecha, monto: fijo.monto, descripcion: fijo.nombre, cuentaId: fijo.cuentaId, categoria: 'Gasto fijo', tipo: 'gasto', creado: Date.now(), gastoFijoId: fijo.id, automatico: true });
-    });
   }
 
   function saldoCuenta(cuentaId) {
@@ -933,7 +931,7 @@
 
   function marcarPagado(fijoId) {
     var fijo = datos.gastosFijos.find(function (f) { return f.id === fijoId; });
-    if (!fijo) return;
+    if (!fijo || pagadoEsteMes(fijoId)) return;
     datos.movimientos.push({
       id: uid(), fecha: new Date().toISOString().slice(0, 10), monto: fijo.monto,
       descripcion: fijo.nombre, cuentaId: fijo.cuentaId, categoria: 'Gasto fijo',
@@ -978,10 +976,19 @@
       var excedido = gastado > p.monto;
       return '<div class="alerta ' + (excedido ? '' : 'proxima') + '"><div class="texto"><b>' + escapeHtml(p.categoria) + '</b> — ' + fmt.format(gastado) + ' de ' + fmt.format(p.monto) + '<span class="estado">' + (excedido ? 'Presupuesto superado' : 'Has usado el 80% o más') + '</span></div></div>';
     }).join('');
-    var htmlDeudas = datos.deudas.filter(function (deuda) { return deuda.saldo > 0 && diasRestantes(deuda.dia) <= 5; }).map(function (deuda) {
+    var htmlDeudas = datos.deudas.filter(function (deuda) {
+      var pagadoMes = datos.movimientos.filter(function (movimiento) {
+        return movimiento.deudaId === deuda.id && movimiento.tipo === 'gasto' && movimiento.fecha.slice(0, 7) === mesActualStr();
+      }).reduce(function (total, movimiento) { return total + movimiento.monto; }, 0);
+      return deuda.saldo > 0 && diasRestantes(deuda.dia) <= 5 && (deuda.cuota <= 0 || pagadoMes < deuda.cuota);
+    }).map(function (deuda) {
       var dias = diasRestantes(deuda.dia);
+      var pagadoMes = datos.movimientos.filter(function (movimiento) {
+        return movimiento.deudaId === deuda.id && movimiento.tipo === 'gasto' && movimiento.fecha.slice(0, 7) === mesActualStr();
+      }).reduce(function (total, movimiento) { return total + movimiento.monto; }, 0);
+      var cuotaPendiente = Math.max(0, deuda.cuota - pagadoMes);
       var texto = dias < 0 ? 'Venció hace ' + Math.abs(dias) + (Math.abs(dias) === 1 ? ' día' : ' días') : (dias === 0 ? 'Vence hoy' : 'Vence en ' + dias + (dias === 1 ? ' día' : ' días'));
-      return '<div class="alerta ' + (dias <= 0 ? '' : 'proxima') + '"><div class="texto"><b>' + escapeHtml(deuda.nombre) + '</b> — cuota ' + fmt.format(deuda.cuota) + '<span class="estado">' + texto + ' · Saldo pendiente: ' + fmt.format(deuda.saldo) + '</span></div></div>';
+      return '<div class="alerta ' + (dias <= 0 ? '' : 'proxima') + '"><div class="texto"><b>' + escapeHtml(deuda.nombre) + '</b> — cuota pendiente ' + fmt.format(cuotaPendiente) + '<span class="estado">' + texto + ' · Saldo total: ' + fmt.format(deuda.saldo) + '</span></div></div>';
     }).join('');
     cont.innerHTML = htmlFijos + htmlPresupuestos + htmlDeudas;
     cont.querySelectorAll('.pagar').forEach(function (btn) {
@@ -1097,7 +1104,6 @@
   });
 
   function render() {
-    generarGastosFijosAutomaticos();
     guardarDatos();
     document.getElementById('fechaHoy').textContent = new Date().toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' });
 
@@ -1151,8 +1157,14 @@
     document.getElementById('ingresoMes').textContent = fmt.format(ingresoMes);
     document.getElementById('gastoMes').textContent = fmt.format(gastoMes);
 
-    var disponible = ingresoMes - gastoMes;
-    var pctGastado = ingresoMes > 0 ? Math.min(100, (gastoMes / ingresoMes) * 100) : (gastoMes > 0 ? 100 : 0);
+    var partes = ym.split('-');
+    var year = parseInt(partes[0], 10), month = parseInt(partes[1], 10) - 1;
+    var diaAnterior = new Date(year, month, 0);
+    var fechaSaldoInicial = diaAnterior.getFullYear() + '-' + String(diaAnterior.getMonth() + 1).padStart(2, '0') + '-' + String(diaAnterior.getDate()).padStart(2, '0');
+    var saldoAnterior = patrimonioHasta(fechaSaldoInicial);
+    var disponible = saldoAnterior + ingresoMes - gastoMes;
+    var baseDisponible = saldoAnterior + ingresoMes;
+    var pctGastado = baseDisponible > 0 ? Math.min(100, (gastoMes / baseDisponible) * 100) : (gastoMes > 0 ? 100 : 0);
     document.getElementById('disponibleRelleno').style.width = pctGastado + '%';
     var cifraEl = document.getElementById('disponibleCifra');
     cifraEl.textContent = fmt.format(disponible);
@@ -1164,10 +1176,8 @@
 
     document.getElementById('labelIngresoMes').textContent = esActual ? 'Ingresos este mes' : 'Ingresos en ' + nombreMes;
     document.getElementById('labelGastoMes').textContent = esActual ? 'Gastos este mes' : 'Gastos en ' + nombreMes;
-    document.getElementById('labelDisponible').textContent = esActual ? 'Disponible del mes' : 'Disponible en ' + nombreMes;
+    document.getElementById('labelDisponible').textContent = 'Disponible acumulado';
 
-    var partes = ym.split('-');
-    var year = parseInt(partes[0], 10), month = parseInt(partes[1], 10) - 1;
     var labelPatr = document.getElementById('labelPatrimonio');
     if (esActual) {
       document.getElementById('patrimonioCifra').textContent = fmt.format(patrimonioTotal());
@@ -1395,7 +1405,7 @@
     var dia = parseInt(document.getElementById('deudaDia').value, 10);
     if (!nombre || !isFinite(saldo) || saldo < 0 || !isFinite(cuota) || cuota < 0 || !isFinite(dia) || dia < 1 || dia > 31) return;
     datos.deudas.push({ id: uid(), nombre: nombre, saldo: saldo, cuota: cuota, dia: dia });
-    guardarDatos(); this.reset(); cerrarGestion(); renderDeudas();
+    guardarDatos(); this.reset(); cerrarGestion(); renderDeudas(); renderAlertas();
   });
 
   document.getElementById('formAbono').addEventListener('submit', function (e) {
@@ -1418,6 +1428,7 @@
     datos.deudas = datos.deudas.filter(function (deuda) { return deuda.id !== id; });
     guardarDatos();
     renderDeudas();
+    renderAlertas();
   });
 
   function ultimosMeses(n) {
@@ -1872,6 +1883,7 @@
         if (!datos.gastosFijos) datos.gastosFijos = [];
         if (!Array.isArray(datos.deudas)) datos.deudas = [];
         if (!Array.isArray(datos.presupuestos)) datos.presupuestos = [];
+        quitarPagosAutomaticosFalsos();
         normalizarAhorros();
         guardarDatos();
         render();
